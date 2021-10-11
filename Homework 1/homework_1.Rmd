@@ -1,0 +1,49 @@
+---
+title: "Homework 1"
+author: "Spencer Matthews"
+date: "10/11/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Problem 1
+
+Complete the following programming exercises in any language of your choice.
+
+**(a) Discrete time individual-based modeling**
+
+*(i) Write a function that simulates a fixed number of generations of a discrete time individual-based SIR model. Your function should have the following user specified arguments: initial vector of individual labels, infection probability $p$, and number of generations $r$*
+
+```{r}
+
+```
+
+
+*(ii) Assuming that initially the population of interest has 9 susceptible individuals, 1 infectious individual, and 0 removed individuals, print 5 realizations of label vectors at each generation using $p = 0.3$ and $r = 5$.*
+
+
+**(b) Continuous time individual-based modeling**
+
+*(i) Write a function that simulates a fixed number of time units of a continuous tim individual-based SIR model. Your function should have the following user specified arguments: initial vector of individual labels, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+
+*(ii) Assuming that initially the population of interest has 9 susceptible individuals, 1 infectious individual, and 0 removed individuals, print 5 realizations of label vectors, using $\beta = 0.8$, $\gamma = 1.5$, and $t = 2$. Print times of events and new label vectors at the event times.*
+
+**(c) Continuous time compartmental modeling**
+
+*(i) Write a function that simulates a fixed number of time units of a continuous time compartmental SIR model. Your function should have the following user specified arguments: initial ector of S, I, and R counts, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+
+*(ii) Assuming that initially the population of interest has 990 susceptible individuals, 10 infectious individuals, and 0 removed individuals, plot 5 realizations of SIR trajectories using $\beta = 0.008$, $\gamma = 3.5$, and $t = 4$.*
+
+## Problem 2
+
+Formulate an extension of an SIR ODE model with vaccinated and unvaccinated compartments. Vaccinated individuals should be able to get infected and to transmit the disease.
+
+**(a) Write down the differential equations**
+
+**(b) Provide interpretations of all parameters**
+
+**(c) What parameters would allow you to measure vaccine efficacy against infection and transmission if you were able to estimate them from the data?**
