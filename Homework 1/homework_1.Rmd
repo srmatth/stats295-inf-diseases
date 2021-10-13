@@ -6,7 +6,8 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(dplyr)
 ```
 
 
@@ -19,24 +20,205 @@ Complete the following programming exercises in any language of your choice.
 *(i) Write a function that simulates a fixed number of generations of a discrete time individual-based SIR model. Your function should have the following user specified arguments: initial vector of individual labels, infection probability $p$, and number of generations $r$*
 
 ```{r}
-
+#' Individual Discrete-Time SIR Model
+#'
+#' @param init_labels The initial labels of the population, a character vector of S,I,R
+#' @param p The infection probability, a number between 0 and 1
+#' @param r The number of generations (ie, the number of time steps), an integer
+individual_discrete <- function(init_labels, p, r) {
+  step_labs <- init_labels
+  res <- data.frame(step_0 = init_labels)
+  for (i in 1:r) {
+    i_t <- sum(step_labs == "I")
+    step_prob <- 1 - (1-p)^i_t
+    step_labs <- purrr::map_chr(
+      .x = step_labs,
+      .f = ~{
+        if (.x == "S") {
+          sample(c("I", "S"), size = 1, prob = c(step_prob, 1 - step_prob))
+        } else{
+          "R"
+        }
+      }
+    )
+    res <- cbind(res, data.frame(step_labs))
+  }
+  res %>%
+    magrittr::set_colnames(
+      stringr::str_c("step_", 0:r)
+    ) %>%
+    magrittr::set_rownames(
+      stringr::str_c("person_", 1:length(init_labels))
+    )
+}
 ```
 
 
 *(ii) Assuming that initially the population of interest has 9 susceptible individuals, 1 infectious individual, and 0 removed individuals, print 5 realizations of label vectors at each generation using $p = 0.3$ and $r = 5$.*
 
+```{r}
+init <- c("S", "S", "S", "S", "S", "S", "I", "S", "S", "S")
+
+for (i in 1:5) {
+  print(stringr::str_c("Realization ", i))
+  individual_discrete(init, p = 0.3, r = 5) %>%
+    print()
+}
+```
+
+
 
 **(b) Continuous time individual-based modeling**
 
-*(i) Write a function that simulates a fixed number of time units of a continuous tim individual-based SIR model. Your function should have the following user specified arguments: initial vector of individual labels, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+*(i) Write a function that simulates a fixed number of time units of a continuous time individual-based SIR model. Your function should have the following user specified arguments: initial vector of individual labels, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+
+```{r}
+individual_continuous <- function(init_labels, beta, gamma, t) {
+  step_labs <- init_labels
+  res <- matrix(init_labels, nrow = 1) %>% 
+    as.data.frame() %>%
+    magrittr::set_colnames(stringr::str_c("person_", 1:length(init_labels)))
+  times <- c(0)
+  repeat {
+    i_t <- sum(step_labs == "I")
+    tmp_df <- data.frame(state = step_labs) %>%
+      dplyr::mutate(
+        exp_race = purrr::map_dbl(
+          .x = state,
+          .f = ~{
+            if (.x == "S") rexp(1, rate = beta * i_t)
+            else if (.x == "I") rexp(1, rate = gamma)
+            else if (.x == "R") NA_real_ 
+          }
+        ),
+        state = dplyr::case_when(
+          exp_race == min(exp_race, na.rm = TRUE) & state == "S" ~ "I",
+          exp_race == min(exp_race, na.rm = TRUE) & state == "I" ~ "R",
+          TRUE ~ state
+        )
+      )
+    step_labs <- tmp_df$state
+    res <- rbind(res, step_labs)
+    times <- append(times, min(tmp_df$exp_race, na.rm = TRUE))
+    
+    if (!(sum(times, na.rm = TRUE) <= t & (!is.na(sum(times))))) break
+  }
+  res %>%
+    magrittr::set_rownames(
+      stringr::str_c("step_", 0:(nrow(.)-1))
+    ) %>%
+    dplyr::mutate(time_of_step = cumsum(times)) %>%
+    dplyr::select(time_of_step, dplyr::everything()) %>%
+    dplyr::filter(time_of_step < t)
+}
+```
+
 
 *(ii) Assuming that initially the population of interest has 9 susceptible individuals, 1 infectious individual, and 0 removed individuals, print 5 realizations of label vectors, using $\beta = 0.8$, $\gamma = 1.5$, and $t = 2$. Print times of events and new label vectors at the event times.*
 
+Note that these print-outs are in the reverse orientation as the ones in the previous parts, so that we could include a time variable as a column.
+
+```{r}
+init <- c("S", "S", "S", "S", "S", "S", "I", "S", "S", "S")
+
+for (i in 1:5) {
+  print(stringr::str_c("Realization ", i))
+  individual_continuous(init, beta = 0.8, gamma = 1.5, t = 2) %>%
+    print()
+}
+```
+
+
 **(c) Continuous time compartmental modeling**
 
-*(i) Write a function that simulates a fixed number of time units of a continuous time compartmental SIR model. Your function should have the following user specified arguments: initial ector of S, I, and R counts, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+*(i) Write a function that simulates a fixed number of time units of a continuous time compartmental SIR model. Your function should have the following user specified arguments: initial vector of S, I, and R counts, infection rate $\beta$, removal rate $\gamma$, and the number of time units $t$.*
+
+```{r}
+compartment_continuous <- function(init_counts, beta, gamma, t) {
+  times <- c(0)
+  res <- data.frame(
+    time = 0,
+    S = init_counts[1],
+    I = init_counts[2],
+    R = init_counts[3]
+  )
+  step <- 1
+  while (sum(times) < t) {
+    i <- rexp(1, rate = beta * res$S[step] * res$I[step])
+    r <- rexp(1, rate = gamma * res$I[step])
+    if (!is.na(i) & !is.na(r) & i < r) {
+      new_res <- data.frame(
+        time = i + sum(times),
+        S = res$S[step] - 1,
+        I = res$I[step] + 1,
+        R = res$R[step]
+      )
+      times <- append(times, i)
+    } else if (!is.na(r)) {
+      new_res <- data.frame(
+        time = r + sum(times),
+        S = res$S[step],
+        I = res$I[step] - 1,
+        R = res$R[step] + 1
+      )
+      times <- append(times, r)
+    } else {
+      break
+    }
+    step <- step + 1
+    res <- rbind(res, new_res)
+  }
+  res %>%
+    rbind(
+      data.frame(
+        time = t,
+        S = res$S[nrow(res)],
+        I = res$I[nrow(res)],
+        R = res$R[nrow(res)]
+      )
+    )
+}
+```
+
 
 *(ii) Assuming that initially the population of interest has 990 susceptible individuals, 10 infectious individuals, and 0 removed individuals, plot 5 realizations of SIR trajectories using $\beta = 0.008$, $\gamma = 3.5$, and $t = 4$.*
+
+```{r, fig.height=4}
+library(ggplot2)
+init_labels <- c(990, 10, 0)
+
+for (i in 1:5) {
+  p <- compartment_continuous(init_labels, beta = 0.008, gamma = 3.5, t = 4) %>%
+    tidyr::pivot_longer(
+      cols = c("S", "I", "R"),
+      names_to = "label",
+      values_to = "value"
+    ) %>%
+    dplyr::mutate(
+      label = dplyr::case_when(
+        label == "S" ~ "Susceptible",
+        label == "I" ~ "Infectious",
+        label == "R" ~ "Removed"
+      )
+    ) %>%
+    ggplot() +
+    aes(x = time, y = value, color = label) +
+    geom_line() +
+    scale_color_manual(values = c("red", "black", "blue")) +
+    xlab("Time") +
+    ylab("Number of People") +
+    ggtitle(
+      stringr::str_c("Realization ", i, " of Compartmental SIR"),
+      "Beta = 0.008, Gamma = 3.5, t = 4"
+    ) +
+    labs(color = "") +
+    theme_bw() +
+    theme(legend.position = c(0.8, 0.5))
+  
+  print(p)
+}
+```
+
 
 ## Problem 2
 
@@ -44,6 +226,56 @@ Formulate an extension of an SIR ODE model with vaccinated and unvaccinated comp
 
 **(a) Write down the differential equations**
 
+First, we will define several functions based on the vaccinated vs. unvaccinated compartments:
+
+- $V_S(t)$ is the number of susceptibles who are vaccinated
+- $U_S(t)$ is the number of susceptibles who are unvaccinated
+- $V_I(t)$ is the number of infectious who are vaccinated
+- $U_I(t)$ is the number of infectious who are unvaccinated
+- $V_R(t)$ is the number of removed who are vaccinated
+- $U_R(t)$ is the number of removed who are unvaccinated
+
+This leads to the overall functions:
+
+- $S(t) = V_S(t) + U_S(t)$ is the total number of susceptibles in the population
+- $I(t) = V_I(t) + U_I(t)$ is the total number of infectious in the population
+- $R(t) = V_R(t) + U_R(t)$ is the total number of removed in the population
+
+We can write the following differential equations for the vaccinated/unvaccinated compartments:
+$$
+\begin{aligned}
+\frac{dV_S(t)}{dt} &= -\beta_1V_S(t)U_I(t) - \beta_2V_S(t)V_I(t) \\
+\frac{dU_S(t)}{dt} &= -\beta_3U_S(t)U_I(t) - \beta_4U_S(t)V_I(t) \\
+\frac{dV_I(t)}{dt} &= \beta_1V_S(t)U_I(t) + \beta_2V_S(t)V_I(t) - \gamma_1V_I(t) \\
+\frac{dU_I(t)}{dt} &= \beta_3U_S(t)U_I(t) + \beta_4U_S(t)V_I(t) - \gamma_2U_I(t) \\
+\frac{dV_R(t)}{dt} &= \gamma_1V_I(t) \\
+\frac{dU_R(t)}{dt} &= \gamma_2U_I(t)
+\end{aligned}
+$$
+
+And for the overall counts, we see that since derivatives are additive, we have
+$$
+\begin{aligned}
+\frac{dS(t)}{dt} &= \frac{dV_S(t)}{dt} + \frac{dU_S(t)}{dt} = -\beta_1V_S(t)U_I(t) - \beta_2V_S(t)V_I(t) -\beta_3U_S(t)U_I(t) - \beta_4U_S(t)V_I(t) \\
+\frac{dI(t)}{dt} &= \frac{dV_I(t)}{dt} + \frac{dU_I(t)}{dt} \\
+&= \beta_1V_S(t)U_I(t) + \beta_2V_S(t)V_I(t) - \gamma_1V_I(t) + \beta_3U_S(t)U_I(t) + \beta_4U_S(t)V_I(t) - \gamma_2U_I(t) \\
+\frac{dR(t)}{dt} &= \frac{dV_R(t)}{dt} + \frac{dU_R(t)}{dt} = \gamma_1V_I(t) + \gamma_2U_I(t)
+\end{aligned}
+$$
 **(b) Provide interpretations of all parameters**
 
+We can interpret the parameters as follows:
+
+- $\beta_1$ is the transmission rate from unvaccinated people to vaccinated people
+- $\beta_2$ is the transmission rate from vaccinated people to vaccinated people
+- $\beta_3$ is the transmission rate from unvaccinated people to vaccinated people
+- $\beta_4$ is the transmission rate from vaccinated people to unvaccinated people
+- $\gamma_1$ is the recovery rate of vaccinated individuals
+- $\gamma_2$ is the recovery rate of unvaccinated individuals
+
+
 **(c) What parameters would allow you to measure vaccine efficacy against infection and transmission if you were able to estimate them from the data?**
+
+Estimating $\beta_1, \beta_2, \beta_3, \beta_4$ would allow you to measure vaccine efficacy against infection and transmission.
+For instance, $\beta_1$ and $\beta_2$ give you information on how likely it is for vaccinated people to become infected, while $\beta_3$ and $\beta_4$ give you information on how likely it is for unvaccinated people to become infected.
+Looking at it from the other way, $\beta_1$ and $\beta_3$ give you information on how likely it is that unvaccinated people transmit the disease, while $\beta_2$ and $\beta_4$ give you information on how likely it is that vaccinated people transmit the disease.
