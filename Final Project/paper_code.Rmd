@@ -1,0 +1,1025 @@
+---
+title: "Spatio-Temporal RV"
+author: "Mónica López Lacort"
+date: "8 de febrero de 2018"
+output: pdf_document
+---
+
+#-------------------------------------------------------------#
+#             MODELO ATRACCION HOSPITALARIA
+#-------------------------------------------------------------#
+
+## Modelo que estima la tasa de hospitalizaci?n por cualquier causa
+## de cada zbs para todo el periodo 2005-2016
+```{r}
+load(file="datos_atrac_hosp.RData")
+```
+# EL MODELO
+```{r}
+
+library(maptools)
+library(spdep)
+library(R2WinBUGS)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+
+overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+z<-z[order(match(z$ZBS,overlay$ZONA_CARTO)),]
+
+W<-poly2nb(overlay)
+W[60]<-as.integer(72)
+W[72][[1]]<-as.integer(c(60,65,74))
+W1<-nb2WB(W)
+
+cat("
+model{
+
+ for(i in 1:n)
+	{
+ 		y[i]~dbin(p[i],N[i])
+
+ 		logit(p[i])<-m+het[i]+sp[i]
+
+ 		het[i]~dnorm(0,prechet)
+ 	}
+
+ sp[1:n]~car.normal(adj[],w[],num[],precsp)
+
+ m~dflat()
+ 
+ prechet<-pow(sdhet,-2)
+ precsp<-pow(sdsp,-2)
+ sdhet~dunif(0,10)
+ sdsp~dunif(0,10)
+
+}
+",file="m1.txt")
+
+
+datos<-list(adj=W1$adj,w=W1$weights, num=W1$num,n=nrow(z),y=z$hosp,N=z$pob)
+
+iniciales<-function(){list(sdhet=runif(1),sdsp=runif(1),m=rnorm(1))}
+parametros<-c("sdhet","sdsp","m","p")
+
+res<-bugs(data=datos, inits=iniciales, parameters=parametros, 
+model.file="m1.txt", n.chains=3, 
+n.iter=40000, n.burnin=20000, debug=TRUE, DIC=FALSE
+,working=getwd())
+
+# probabilidad promedio de hospitalizar
+
+atrac<-res$summary[4:nrow(res$summary),1]
+z<-cbind(z,atrac)
+
+save(z,file="datos_prob_hospitalizar_zbs.RData")
+```
+
+# EL MAPA DE ATRACC.
+```{r}
+library(maptools)
+library(spdep)
+library(R2WinBUGS)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+library(leaflet)
+library(scales)
+
+overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+load(file="datos_prob_hospitalizar_zbs.RData"); z<-z[,c(1,4)]
+
+z<-z[order(match(z$ZBS,overlay$ZONA_CARTO)),]
+
+geo<-read.csv(file="geolocalizaciones.csv",sep=";")
+
+#------------------------------------------------------
+palz<-brewer.pal(9,"Reds")[1:9]
+paintz<-as.factor((cut(z$atrac*100,c(5,10,15,20,25,30,35,40,45,50))))
+levz=levels(paintz)
+popupz<-paste(overlay$NOMBRE,round(z$atrac*100,1),"hosp. per 100 children")
+
+geo$color<- "darkred"
+geo$color[geo$PROV=="CASTELLON"]<-"red"
+geo$color[geo$PROV=="VALENCIA"]<-"purple"
+
+icons <- awesomeIcons(icon = "whatever",
+                      iconColor = "black",
+                      library = "ion",
+                      markerColor = geo$color)
+
+ m<-leaflet() %>% addTiles() %>%
+   setView(lng = -0.7532809, lat = 39.4840108, zoom = 7) %>% addTiles() %>%
+   addAwesomeMarkers(lat = geo$LAT, lng = geo$LON,icon=icons,popup=geo$X)  %>%
+  addPolygons(data=overlay , weight=1, col = 'black'
+              ,smoothFactor = 0
+              ,opacity = 1.0
+              ,fillOpacity = 0.7
+              ,fillColor = brewer_pal(palette = "Greys")(9)[as.numeric(paintz)]              
+              ,popup =popupz
+              ,highlightOptions = highlightOptions(color = "white"
+                                                   ,weight = 2
+                                                   ,bringToFront = TRUE)) %>%
+   addLegend(colors = brewer_pal(palette = "Greys")(nlevels(paintz))
+             , labels = levels(paintz), opacity = .7,
+             title = "Hospitalizations per 100 children") %>%
+ addTiles(urlTemplate = "http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png")
+
+
+ library(htmlwidgets)
+ saveWidget(m, file="supplemental.html")
+```
+
+#-------------------------------------------------------------#
+#             MODELO S-T RV
+#-------------------------------------------------------------#
+
+# MODRV efectos-modelo (ESPACIO-TEMPORAL ZBS + DPTO)
+```{r}
+
+load(file="datos_prob_hospitalizar_zbs.RData"); z<-z[,c(1,4)]
+load(file="datos_mod_impacto.RData")
+
+dat_mod<-merge(dat,z,by="ZBS",all.x=T)
+dat_mod<-subset(dat_mod,ANO!="2003-2004")  
+set.seed(85)
+
+cat("
+model{
+  
+  for(i in 1:n){
+
+      y[i]~dbin(p[i],N[i])
+      
+  logit(p[i])<-logit(atrac[i])+beta_0+ beta_1*vac[i]+ beta_2*sexo[i]      +beta_3[edad[i]]+alpha_d[dpto[i]] + inter[tiempo[i]] + theta.ST[tiempo[i],zbs[i]]
+      
+   }
+
+  #------------------------------------------------------------------------
+      #Spatio-temporal effect for the first period
+  #------------------------------------------------------------------------
+
+      for(z in 1:nzbs){
+
+      BYM[1,z]<-sd.spat*theta.S[1,z]+sd.het*het[1,z]
+
+      het[1,z]~dnorm(0,1)
+
+      theta.ST[1,z]<-pow(1-ro*ro,-0.5)*BYM[1,z]
+     }
+      
+      theta.S[1,1:nzbs]~car.normal(map[],w[],nvec[],1)
+
+
+  #------------------------------------------------------------------------
+      #Spatio-temporal effect for the subsequent periods
+  #------------------------------------------------------------------------
+
+    for(t in 2:nperiods){
+
+        for(z in 1:nzbs){
+
+        BYM[t,z]<-sd.spat*theta.S[t,z]+sd.het*het[t,z]
+  
+        het[t,z]~dnorm(0,1)          
+
+        theta.ST[t,z]<-ro*theta.ST[t-1,z]+BYM[t,z]
+            
+        }
+        theta.S[t,1:nzbs]~car.normal(map[],w[],nvec[],1)
+    }
+  
+  #------------------------------------------------------------------------            
+  #           Priors
+  #------------------------------------------------------------------------
+
+#Prior distributions
+  
+    beta_0~dflat()
+    beta_1~dflat()
+    beta_2~dflat()
+    
+    beta_3[1]<-0
+    for(k in 2:3){beta_3[k]~dflat()}
+    
+    
+    sd.het~dunif(0,5)
+    
+    sd.spat~dunif(0,5)
+
+# Helth department effect
+
+    for(d in 1:24){
+
+     alpha_d[d]~dnorm(0,tau.d)
+
+    }
+
+    tau.d<-pow(sd.d,-2)
+    sd.d ~ dunif(0,5)
+
+#Prior distribution for the global time trend
+
+inter[1:6]~car.normal(mapT[],wT[],nvecT[],tau.inter)
+
+tau.inter<-pow(sd.inter,-2)
+sd.inter ~ dunif(0,5)
+
+#Prior distribution for the temporal dependence parameter
+    ro~dunif(-1,1)
+
+
+}
+",file="m1.txt")
+
+#---------------
+# Datos espacial
+#---------------
+overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+
+dat_mod2<-dat_mod[order(match(dat_mod$ZBS,overlay$ZONA_CARTO)),]
+
+W<-poly2nb(overlay)
+W[60]<-as.integer(72)
+W[72][[1]]<-as.integer(c(60,65,74))
+W1<-nb2WB(W)
+
+dat_mod2$ZBS<-as.numeric(as.factor(dat_mod2$ZBS))
+dat_mod2$DPTO<-as.numeric(as.factor(dat_mod2$DPTO))
+dat_mod2$SEXO<-as.numeric(as.factor(dat_mod2$SEXO))-1
+dat_mod2$VAC<-as.numeric(as.factor(dat_mod2$VAC))-1
+dat_mod2$EDAD<-as.numeric(as.factor(dat_mod2$EDAD))
+dat_mod2$ANO<-as.numeric(as.factor(dat_mod2$ANO))
+
+mapT<-c(2,1,3,2,4,3,5,4,6,5)#c(1,rep(2:6,each=2),7)+c(1,rep(c(-1,1),5),-1)
+numT<-c(1,2,2,2,2,1)#c(1,rep(2,5),1)
+wT<-rep(1,10) #rep(1,12)
+
+#----------------------------------------------------------------------------
+#                     DATOS MODELO
+#----------------------------------------------------------------------------
+datos<-list(y=dat_mod2$RV,
+            atrac=dat_mod2$atrac,
+            vac=dat_mod2$VAC,
+            sexo=dat_mod2$SEXO,
+            edad=dat_mod2$EDAD,
+            dpto=dat_mod2$DPTO,
+            zbs=dat_mod2$ZBS,
+            tiempo=dat_mod2$ANO,
+            map=W1$adj,w=W1$weights, nvec=W1$num,
+            mapT=mapT,wT=wT, nvecT=numT,
+            n=nrow(dat_mod2),
+            N=dat_mod2$pob,
+            nperiods=6,
+            nzbs=241
+                        )
+
+
+#----------------------------------------------------------------------------
+#                      VALORES INICIALES y PARAMETROS
+#----------------------------------------------------------------------------
+iniciales<-function(){list(beta_0=rnorm(1),beta_1=rnorm(1),
+                           beta_2=rnorm(1),
+                           beta_3=c(NA,rnorm(2)),
+                           theta.S=matrix(rnorm(6*241),ncol=241,nrow=6),
+                           sd.d=runif(1),
+                           inter=rnorm(6),
+                           sd.inter=runif(1),
+                           sd.het=runif(1),
+                           sd.spat=runif(1),
+                           ro=runif(1)
+                           )}
+parametros<-c("beta_0","beta_1","beta_2","ro","sd.spat","sd.het","sd.d","sd.inter","beta_3","alpha_d","inter","theta.ST")
+
+#----------------------------------------------------------------------------
+#                     FUNCION BUGS
+#----------------------------------------------------------------------------
+res<-bugs(data=datos, inits=iniciales, parameters=parametros, 
+model.file="m1.txt", n.chains=3, 
+n.iter=10000, n.burnin=2000, debug=TRUE, DIC=TRUE
+,working=getwd())
+
+save(res,file="MOD4_param_RVbueno.RData")
+save(dat_mod2,file="impacto.RData")
+```
+
+#-------------------------------------------------------------#
+#             MODELO S-T GEA
+#-------------------------------------------------------------#
+# MOD4 efectos-modelo (ESPACIO-TEMPORAL ZBS + DPTO)
+```{r}
+load(file="datos_prob_hospitalizar_zbs.RData"); z<-z[,c(1,4)]
+load(file="datos_mod_impacto.RData")
+
+dat_mod<-merge(dat,z,by="ZBS",all.x=T)
+dat_mod<-subset(dat_mod,ANO!="2003-2004")
+
+set.seed(85)
+
+cat("
+model{
+  
+  for(i in 1:n){
+
+      y[i]~dbin(p[i],N[i])
+      
+  logit(p[i])<-logit(atrac[i])+beta_0+ beta_1*vac[i]+ beta_2*sexo[i]      +beta_3[edad[i]]+alpha_d[dpto[i]] + inter[tiempo[i]] + theta.ST[tiempo[i],zbs[i]]
+      
+   }
+
+  #------------------------------------------------------------------------
+      #Spatio-temporal effect for the first period
+  #------------------------------------------------------------------------
+
+      for(z in 1:nzbs){
+
+      BYM[1,z]<-sd.spat*theta.S[1,z]+sd.het*het[1,z]
+
+      het[1,z]~dnorm(0,1)
+
+      theta.ST[1,z]<-pow(1-ro*ro,-0.5)*BYM[1,z]
+     }
+      
+      theta.S[1,1:nzbs]~car.normal(map[],w[],nvec[],1)
+
+
+  #------------------------------------------------------------------------
+      #Spatio-temporal effect for the subsequent periods
+  #------------------------------------------------------------------------
+
+    for(t in 2:nperiods){
+
+        for(z in 1:nzbs){
+
+        BYM[t,z]<-sd.spat*theta.S[t,z]+sd.het*het[t,z]
+  
+        het[t,z]~dnorm(0,1)          
+
+        theta.ST[t,z]<-ro*theta.ST[t-1,z]+BYM[t,z]
+            
+        }
+        theta.S[t,1:nzbs]~car.normal(map[],w[],nvec[],1)
+    }
+  
+  #------------------------------------------------------------------------            
+  #           Priors
+  #------------------------------------------------------------------------
+
+#Prior distributions
+  
+    beta_0~dflat()
+    beta_1~dflat()
+    beta_2~dflat()
+    
+    beta_3[1]<-0
+    for(k in 2:3){beta_3[k]~dflat()}
+    
+    
+    sd.het~dunif(0,5)
+    
+    sd.spat~dunif(0,5)
+
+# Helth department effect
+
+    for(d in 1:24){
+
+     alpha_d[d]~dnorm(0,tau.d)
+
+    }
+
+    tau.d<-pow(sd.d,-2)
+    sd.d ~ dunif(0,5)
+
+#Prior distribution for the global time trend
+
+inter[1:6]~car.normal(mapT[],wT[],nvecT[],tau.inter)
+
+tau.inter<-pow(sd.inter,-2)
+sd.inter ~ dunif(0,5)
+
+#Prior distribution for the temporal dependence parameter
+    ro~dunif(-1,1)
+
+
+}
+",file="m1.txt")
+
+#---------------
+# Datos espacial
+#---------------
+overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+
+dat_mod2<-dat_mod[order(match(dat_mod$ZBS,overlay$ZONA_CARTO)),]
+
+W<-poly2nb(overlay)
+W[60]<-as.integer(72)
+W[72][[1]]<-as.integer(c(60,65,74))
+W1<-nb2WB(W)
+
+dat_mod2$ZBS<-as.numeric(as.factor(dat_mod2$ZBS))
+dat_mod2$DPTO<-as.numeric(as.factor(dat_mod2$DPTO))
+dat_mod2$SEXO<-as.numeric(as.factor(dat_mod2$SEXO))-1
+dat_mod2$VAC<-as.numeric(as.factor(dat_mod2$VAC))-1
+dat_mod2$EDAD<-as.numeric(as.factor(dat_mod2$EDAD))
+dat_mod2$ANO<-as.numeric(as.factor(dat_mod2$ANO))
+
+mapT<-c(2,1,3,2,4,3,5,4,6,5)#c(1,rep(2:6,each=2),7)+c(1,rep(c(-1,1),5),-1)
+numT<-c(1,2,2,2,2,1)#c(1,rep(2,5),1)
+wT<-rep(1,10) #rep(1,12)
+
+#----------------------------------------------------------------------------
+#                     DATOS MODELO
+#----------------------------------------------------------------------------
+datos<-list(y=dat_mod2$GEA,
+            atrac=dat_mod2$atrac,
+            vac=dat_mod2$VAC,
+            sexo=dat_mod2$SEXO,
+            edad=dat_mod2$EDAD,
+            dpto=dat_mod2$DPTO,
+            zbs=dat_mod2$ZBS,
+            tiempo=dat_mod2$ANO,
+            map=W1$adj,w=W1$weights, nvec=W1$num,
+            mapT=mapT,wT=wT, nvecT=numT,
+            n=nrow(dat_mod2),
+            N=dat_mod2$pob,
+            nperiods=6,
+            nzbs=241
+                        )
+
+
+#----------------------------------------------------------------------------
+#                      VALORES INICIALES y PARAMETROS
+#----------------------------------------------------------------------------
+iniciales<-function(){list(beta_0=rnorm(1),beta_1=rnorm(1),
+                           beta_2=rnorm(1),
+                           beta_3=c(NA,rnorm(2)),
+                           theta.S=matrix(rnorm(6*241),ncol=241,nrow=6),
+                           sd.d=runif(1),
+                           inter=rnorm(6),
+                           sd.inter=runif(1),
+                           sd.het=runif(1),
+                           sd.spat=runif(1),
+                           ro=runif(1)
+                           )}
+parametros<-c("beta_0","beta_1","beta_2","ro","sd.spat","sd.het","sd.d","sd.inter",
+              "beta_3","alpha_d","inter","theta.ST")
+
+#----------------------------------------------------------------------------
+#                     FUNCION BUGS
+#----------------------------------------------------------------------------
+set.seed(85)
+
+res<-bugs(data=datos, inits=iniciales, parameters=parametros, 
+model.file="m1.txt", n.chains=3, 
+n.iter=15000, n.burnin=3000, debug=TRUE, DIC=TRUE
+,working=getwd())
+
+save(res,file="MOD4_param_bueno.RData")
+```
+#-------------------------------------------------------------#
+#             RESULTADOS MODELOS S-T (TABLA 1)
+#-------------------------------------------------------------#
+```{r}
+load(file="MOD4_param_bueno.RData")   # Res GEA
+load(file="MOD4_param_RVbueno.RData") # Res RV
+
+# Coefficients
+
+#--------------------------------------------------------------------------------------
+intercept<-paste(round(mean(res$sims.list$beta_0),2),"(",
+                 round(quantile(res$sims.list$beta_0,0.025),2),",",
+                 round(quantile(res$sims.list$beta_0,0.975),2),")",sep="")
+
+Unvaccinated<-0
+Vaccinated<-paste(round(mean(res$sims.list$beta_1),2),"(",
+                  round(quantile(res$sims.list$beta_1,0.025),2),",",
+                  round(quantile(res$sims.list$beta_1,0.975),2),")",sep="")
+
+age0<-0
+age1<-paste(round(apply(res$sims.list$beta_3,2,mean)[1],2),"(",
+            round(apply(res$sims.list$beta_3,2,function(x)quantile(x,0.025))[1],2),",",
+            round(apply(res$sims.list$beta_3,2,function(x)quantile(x,0.975))[1],2),")",sep="")
+age2<-paste(round(apply(res$sims.list$beta_3,2,mean)[2],2),"(",
+            round(apply(res$sims.list$beta_3,2,function(x)quantile(x,0.025))[2],2),",",
+            round(apply(res$sims.list$beta_3,2,function(x)quantile(x,0.975))[2],2),")",sep="")
+Males<-0
+Females<-paste(round(mean(res$sims.list$beta_2),2),"(",round(quantile(res$sims.list$beta_2,0.025),2),",",round(quantile(res$sims.list$beta_2,0.975),2),")",sep="")
+
+Health_department_unstructured<-paste(round(mean(res$sims.list$sd.d),2),"(",round(quantile(res$sims.list$sd.d,0.025),2),",",round(quantile(res$sims.list$sd.d,0.975),2),")",sep="")
+
+Health_care_district_unstructured<-paste(round(mean(res$sims.list$sd.het),2),"(",round(quantile(res$sims.list$sd.het,0.025),2),",",round(quantile(res$sims.list$sd.het,0.975),2),")",sep="")
+
+Health_care_district_structured<-paste(round(mean(res$sims.list$sd.spat),2),"(",round(quantile(res$sims.list$sd.spat,0.025),2),",",round(quantile(res$sims.list$sd.spat,0.975),2),")",sep="")
+
+Periodo_structured<-paste(round(mean(res$sims.list$sd.inter),2),"(",round(quantile(res$sims.list$sd.inter,0.025),2),",",round(quantile(res$sims.list$sd.inter,0.975),2),")",sep="")
+
+ro<-paste(round(mean(res$sims.list$ro),2),"(",round(quantile(res$sims.list$ro,0.025),2),",",round(quantile(res$sims.list$ro,0.975),2),")",sep="")
+
+tabla1<-rbind(intercept,Unvaccinated,Vaccinated,age0,age1,age2,Males,Females,Health_department_unstructured,Health_care_district_unstructured,Health_care_district_structured,Periodo_structured,ro)
+#--------------------------------------------------------------------------------------
+
+# OR
+
+
+Unvaccinated<-0
+Vaccinated<-paste(round(mean(sapply(res$sims.list$beta_1,exp)),2),"(",
+                  round(quantile(sapply(res$sims.list$beta_1,exp),0.025),2),",",
+                  round(quantile(sapply(res$sims.list$beta_1,exp),0.975),2),")",sep="")
+
+age0<-0
+age1<-paste(round(apply(apply(res$sims.list$beta_3,2,exp),2,mean)[1],2),"(",
+            round(apply(apply(res$sims.list$beta_3,2,exp),2,function(x)quantile(x,0.025))[1],2),",",
+            round(apply(apply(res$sims.list$beta_3,2,exp),2,function(x)quantile(x,0.975))[1],2),")",
+            sep="")
+
+age2<-paste(round(apply(apply(res$sims.list$beta_3,2,exp),2,mean)[2],2),"(",
+            round(apply(apply(res$sims.list$beta_3,2,exp),2,function(x)quantile(x,0.025))[2],2),",",
+            round(apply(apply(res$sims.list$beta_3,2,exp),2,function(x)quantile(x,0.975))[2],2),")",
+            sep="")
+Males<-0
+Females<-paste(round(mean(sapply(res$sims.list$beta_2,exp)),2),"(",
+                  round(quantile(sapply(res$sims.list$beta_2,exp),0.025),2),",",
+                  round(quantile(sapply(res$sims.list$beta_2,exp),0.975),2),")",sep="")
+
+tabla2<-rbind(0,Unvaccinated,Vaccinated,age0,age1,age2,Males,Females,0,0,0,0,0)
+
+tabla<-cbind(tabla1,tabla2)
+
+write.table(tabla,file="tabla1.csv",sep=";")
+```
+# OR,departamento y periodo
+```{r}
+
+load(file="MOD4_param_bueno.RData")   # Res GEA
+load(file="MOD4_param_RVbueno.RData") # Res RV
+
+# DEPTO
+
+x<-apply(apply(res$sims.list$alpha_d,2,exp),2,mean)
+l1<-apply(apply(res$sims.list$alpha_d,2,exp),2,function(x)quantile(x,0.025))
+l2<-apply(apply(res$sims.list$alpha_d,2,exp),2,function(x)quantile(x,0.975))
+Dpto<-as.factor(c("01","02","03","04","05","06","07","08","09",10:24))
+
+t<-data.frame(x,l1,l2,Dpto)
+
+library(ggplot2)
+t$a<-""
+limits <- aes(ymax = l1, ymin=l2)
+
+g<-ggplot(t, aes(Dpto,x,group=a)) + geom_point(size=3)+ylab("OR, 95% CI")+geom_hline(yintercept = 1,colour="red",linetype="dashed")
+g<-g + xlab("Health Department") +scale_fill_brewer(palette="Set3")+ggtitle("")+coord_flip()
+g<-g+theme_bw()+geom_errorbar(limits, width=0.25)
+g<-g+theme(plot.title = element_text(size=12, face="bold", vjust=2))
+g<-g+theme(panel.background = element_rect(fill = "white"))
+g<-g+theme(strip.text.x = element_text(face = "bold",size = 12, hjust = 0.5, vjust = 0.5),axis.text=element_text(size=12), axis.title=element_text(size=12,face="bold"))
+g<-g+theme(panel.grid.major = element_line(colour = "white"))
+g<-g+theme(plot.title = element_text(size=12, face="bold", vjust=2))
+
+print(g)
+
+# efecto periodo
+x<-apply(apply(res$sims.list$inter,2,exp),2,mean)
+l1<-apply(apply(res$sims.list$inter,2,exp),2,function(x)quantile(x,0.025))
+l2<-apply(apply(res$sims.list$inter,2,exp),2,function(x)quantile(x,0.975))
+periodo<-c("2005-2006","2007-2008","2009-2010","2011-2012",
+           "2013-2014","2015-2016")
+t<-data.frame(x,l1,l2,periodo)
+
+library(ggplot2)
+
+t$a<-""
+limits <- aes(ymax = l1, ymin=l2)
+
+g<-ggplot(t, aes(periodo,x,group=a)) + geom_point(size=3)+ylab("OR, 95% CI")+geom_hline(yintercept = 1,colour="red",linetype="dashed")+geom_line(colour="blue")
+g<-g + xlab("Period") +scale_fill_brewer(palette="Set3")+ggtitle("")
+g<-g+theme_bw()+geom_errorbar(limits, width=0.25)
+g<-g+theme(plot.title = element_text(size=12, face="bold", vjust=2))
+g<-g+theme(panel.background = element_rect(fill = "white"))
+g<-g+theme(strip.text.x = element_text(face = "bold",size = 12, hjust = 0.5, vjust = 0.5),axis.text=element_text(size=12), axis.title=element_text(size=12,face="bold"))
+g<-g+theme(panel.grid.major = element_line(colour = "white"))
+g<-g+theme(plot.title = element_text(size=12, face="bold", vjust=2))
+
+print(g)
+```
+# MAPAS S-T
+```{r}
+
+load(file="MOD4_param_bueno.RData")   # Res GEA
+load(file="MOD4_param_RVbueno.RData") # Res RV
+
+#---------------------------------------------------------------------------------
+#                           MAPA efecto ST
+#---------------------------------------------------------------------------------
+
+library(maptools)
+library(spdep)
+library(R2WinBUGS)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+library(leaflet)
+
+overlaya<- readOGR("C:/Users/04618027H.FISABIO/Desktop/PROYECTOS/MONICA UCV/MONICA/SPATIO-TEMPORAL RV/SCRIPT/app - vf/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+overlay$ZBS<-as.numeric(as.factor(as.character(overlay$ZONA_CARTO)))
+
+# cambiar  
+
+for( i in 1:6)
+{
+x<-t(apply(apply(res$sims.list$theta.ST,1:3,exp),2:3,mean))[,i]
+zbs<-1:241
+
+t<-data.frame(x,zbs)
+t<-t[order(match(t$zbs,overlay$ZBS)),]
+
+palz<-brewer.pal(7,"BrBG")[1:7]
+
+y<-c(-1,-0.5,-0.25,-0.1,0.1,0.25,0.5,1)
+
+paintz<-as.factor(cut(1-t$x,y))
+levz=levels(paintz)
+popupz<-paste(overlay$NOMBRE,round(t$x,2))
+
+def.par <- par(no.readonly = TRUE)
+postscript(paste(i,"gea.eps",sep=""))
+
+plot(overlay,col=palz[paintz])
+dev.off()
+}
+
+# title("",cex=0.75)
+# legend(x="bottomright",fill=palz[1:7],
+#        legend=c("> 50% high.","25-50% high.","10-25% high.","","10-25% low.","25-50% low.","> 50% low."),
+#        cex=0.7,inset=0.03,title="")
+
+```
+#-------------------------------------------------------------#
+#             RESULTADOS IMPACTO (TABLA 2)
+#-------------------------------------------------------------#
+
+# COBERTURA VACUNAL POR PERIODOS  Y ZBS
+```{r}
+  
+#--------------------------------------------------------------------------------------
+#                    GIF MAP R Version 3.4.2
+#--------------------------------------------------------------------------------------
+ # load libraries
+library(curl)
+library(readxl)
+library(data.table)
+library(rworldmap)
+library(ggplot2)
+library(dplyr)
+library(tweenr)
+library(ggthemes)
+library(viridis)
+library(rgeos)
+library(countrycode)
+library(devtools)
+#install_github("dgrtwo/gganimate", ref = "26ec501")
+library(gganimate)
+library(maptools)
+library(spdep)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+library(leaflet)
+library(ggmap)
+library(scales)
+library(magick)
+gpclibPermit()
+gpclibPermitStatus()
+
+
+#----------------------------------------------------------
+#                 GIF COBERTURA
+#----------------------------------------------------------
+
+load(file="../DATOS/datos_mapa_cobertura.RData")
+
+# cargamos datos
+overlaya<- readOGR(".", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=robin")) # reproject
+overlay$ZBS<-as.numeric(as.factor(as.character(overlay$ZONA_CARTO)))
+
+datos$ZBS<-as.character(as.numeric(as.factor(as.character(datos$ZBS))))
+
+wmap_df <- fortify(overlay, region = "ZBS")
+
+# merge shapefile and data
+mapa <- left_join(wmap_df, datos, by = c('id'='ZBS'))
+mapa$coverage<-mapa$vac/mapa$pob*100
+
+# get Min and Max values of life expectancy
+vmax <- max(mapa$coverage, na.rm=T)
+vmin <- min(mapa$coverage, na.rm=T)
+
+
+mapa$ANO2<-NULL
+mapa$ANO2[mapa$ANO==1]<-"2005-2006"
+mapa$ANO2[mapa$ANO==2]<-"2007-2008"
+mapa$ANO2[mapa$ANO==3]<-"2009-2010"
+mapa$ANO2[mapa$ANO==4]<-"2011-2012"
+mapa$ANO2[mapa$ANO==5]<-"2013-2014"
+mapa$ANO2[mapa$ANO==6]<-"2015-2016"
+
+theme_opts <- list(theme(panel.grid.minor = element_blank(),
+                         panel.grid.major = element_blank(),
+                         panel.background = element_blank(),
+                         plot.background = element_blank(),
+                         panel.border = element_blank(),
+                         axis.line = element_blank(),
+                         axis.text.x = element_blank(),
+                         axis.text.y = element_blank(),
+                         axis.ticks = element_blank(),
+                         axis.title.x = element_blank(),
+                         axis.title.y = element_blank(),
+                         legend.position="right",
+                         plot.title = element_text(size=16)))
+
+# plot
+o <- ggplot(data=mapa) +
+  geom_polygon(aes(x = long, y = lat,group = group, frame = ANO2), color="black",fill="pink") +
+  theme_opts +coord_equal() 
+
+
+# plot
+o <- ggplot(data=mapa) +
+  geom_polygon(aes(x = long, y = lat, group = group, fill=coverage, frame = ANO2), color="grey") +
+  theme_opts +
+  coord_equal() +
+  labs(title = paste("Rotavirus vaccine coverage:",levels(mapa$ANO2)),
+       subtitle = "Children < 3 years",
+       caption = 'Vaccinated children % by health care district, 2005-2016') +
+  scale_fill_distiller(name='Coverage (%)', direction = 1, palette='Blues')
+
+a<-gg_animate(o, "img.mp4", saver="mp4", title_frame =T)
+
+a<-gg_animate(o,  saver="gif", title_frame =T)
+a<-gg_animate(o,title_frame =T)
+gg_animate_save(a,"im.gif",saver="gif")
+
+anim_save(o)
+```
+#-------------------------------------------------------------#
+#             RESULTADOS IMPACTO S-T (FIGURA 1)
+#-------------------------------------------------------------#
+```{r}
+
+# NEO
+
+load(file="MOD4_param_bueno.RData")   # Res GEA
+load(file="MOD4_param_RVbueno.RData") # Res RV
+load(file="impacto.RData")
+
+attach(dat_mod2)
+attach(res)
+#-----------------------------------------------------------------------------
+#                               PREDICCI?N
+#-----------------------------------------------------------------------------
+p<-matrix(nrow = nrow(dat_mod2),ncol=1002)
+p.sinv<-matrix(nrow = nrow(dat_mod2),ncol=1002)
+p.con<-matrix(nrow = nrow(dat_mod2),ncol=1002)
+
+edad<-EDAD; dpto<-DPTO; zbs<-ZBS; inter<-ANO; st<-NULL
+
+for(i in 1:1002)
+{
+   
+   edad[edad==1]<-0
+   edad[edad==2]<-t(sims.list$beta_3)[1,i]
+   edad[edad==3]<-t(sims.list$beta_3)[2,i] 
+   
+   for(j in 1:24){dpto[DPTO==j]<-t(sims.list$alpha_d)[j,i]}
+   
+   for(k in 1:6){inter[ANO==k]<-t(sims.list$inter)[k,i]}
+   
+   for(z in 1:241)
+     {
+        for(k2 in 1:6){
+         st[ANO==k2 & ZBS==z]<-sims.list$theta.ST[i,k2,z]
+        }
+     }
+   
+  logitp<-log(atrac/(1-atrac))+sims.list$beta_0[i]+sims.list$beta_1[i]*VAC+
+          sims.list$beta_2[i]*SEXO + edad + dpto+ inter + st 
+  
+  logitp.sin<-log(atrac/(1-atrac)) + sims.list$beta_0[i]+sims.list$beta_2[i]*SEXO+ edad + dpto+ inter + st
+  
+  logitp.con<-log(atrac/(1-atrac)) + sims.list$beta_0[i]+sims.list$beta_1[i]+
+    sims.list$beta_2[i]*SEXO+ edad + dpto+ inter + st
+ 
+   p[,i]<-exp(logitp)/(1+exp(logitp))
+   p.con[,i]<-exp(logitp.con)/(1+exp(logitp.con))
+   p.sinv[,i]<-exp(logitp.sin)/(1+exp(logitp.sin))
+}
+
+#################### N? DE CASOS (PREDICCI?N) ##################
+
+y.pred<-matrix(nrow = nrow(dat_mod2), ncol=1002)
+y.pred.sin<-matrix(nrow = nrow(dat_mod2), ncol=1002)
+y.pred.con<-matrix(nrow = nrow(dat_mod2), ncol=1002)
+
+for(i in 1:1002)
+{
+  y.pred[,i]<-pob*p[,i]
+  y.pred.sin[,i]<-pob*p.sinv[,i]
+  y.pred.con[,i]<-pob*p.con[,i]
+}
+
+dif<-y.pred.sin-y.pred
+# si vacunasemos a todos (los que nos ahorramos)
+dif.tot<-y.pred.sin-y.pred.con
+
+x<-mean(apply(dif,2,sum))
+l1<-quantile(apply(dif,2,sum),0.025)
+l2<-quantile(apply(dif,2,sum),0.975)
+
+# vemos cuantas habr?a sin vacuna
+tot.sin<-mean(apply(y.pred.sin,2,sum))
+l1.tot.sin<-quantile(apply(y.pred.sin,2,sum),0.025)
+l2.tot.sin<-quantile(apply(y.pred.sin,2,sum),0.975)
+
+x.tot<-mean(apply(dif.tot,2,sum))
+l1.tot<-quantile(apply(dif.tot,2,sum),0.025)
+l2.tot<-quantile(apply(dif.tot,2,sum),0.975)
+
+# % EVITADAS
+round(x/tot.sin*100,1)
+round(l1/l1.tot.sin*100,1)
+round(l2/l2.tot.sin*100,1)
+
+# % EVITADAS si hubiesemos vacunado a todos
+round(x.tot/tot.sin*100,1)
+round(l1.tot/l1.tot.sin*100,1)
+round(l2.tot/l2.tot.sin*100,1)
+
+# impacto por periodos
+#.............................................................................
+# cambiar por: dif/dif.tot
+DAT<-data.frame(cbind(dat_mod2$ANO,dif));names(DAT)[1]<-c("ANO")
+I<-apply(DAT[2:1003],2, function(x){aggregate(x~ANO,sum,data=DAT)})
+
+A<-data.frame(matrix(nrow=6,ncol=1002))
+
+for(i in 1:1002)
+{
+  A[,i]<-I[[i]][2]
+}
+
+x<-apply(A,1,mean)
+l1<-apply(A,1,function(x)quantile(x,0.025))
+l2<-apply(A,1,function(x)quantile(x,0.975))
+B<-cbind(I[[1]][1],x,l1,l2)
+
+# PARA CALCULAR LOS QUE HABR?A SIN VACUNAR A NADIE
+
+DAT<-data.frame(cbind(dat_mod2$ANO,y.pred.sin));names(DAT)[1]<-c("ANO")
+I<-apply(DAT[2:1003],2, function(x){aggregate(x~ANO,sum,data=DAT)})
+
+A<-data.frame(matrix(nrow=6,ncol=1002))
+
+for(i in 1:1002)
+{
+  A[,i]<-I[[i]][2]
+}
+
+x.sin<-apply(A,1,mean)
+l1.sin<-apply(A,1,function(x)quantile(x,0.025))
+l2.sin<-apply(A,1,function(x)quantile(x,0.975))
+B.sin<-cbind(I[[1]][1],x.sin,l1.sin,l2.sin)
+
+B$w<-paste(round(B$x/B.sin$x.sin*100),"%,",round(B$x),"(",round(B$l1),",",round(B$l2),")",sep="")
+write.table(B,file="tabla2_2.csv",sep=";")
+
+round(B$x/B.sin$x.sin*100,1)
+round(B$l1/B.sin$l1.sin*100,1)
+round(B$l2/B.sin$l2.sin*100,1)
+
+#.............................................................................
+#         IMPACTO SPATIO-TEMPORAL
+#.............................................................................
+
+# cambiar por: dif/dif.tot
+DAT<-data.frame(cbind(dat_mod2$ZBS,dat_mod2$ANO,dif));names(DAT)[1:2]<-c("ZBS","ANO")
+I<-apply(DAT[3:1004],2, function(x){aggregate(x~ZBS+ANO,sum,data=DAT)})
+
+A<-data.frame(matrix(nrow=1446,ncol=1002))
+
+for(i in 1:1002)
+{
+  A[,i]<-I[[i]][3]
+}
+
+x<-apply(A,1,mean)
+l1<-apply(A,1,function(x)quantile(x,0.025))
+l2<-apply(A,1,function(x)quantile(x,0.975))
+B<-cbind(I[[1]][1],I[[1]][2],x,l1,l2)
+
+save(B,file="resultados_impacto.RData")
+save(B,file="resultados_impactoGEA.RData")
+
+
+#.................... PC
+
+load(file="resultados_impacto.RData") # RV
+load(file="resultados_impactoGEA.RData") # GEA
+
+
+library(maptools)
+library(spdep)
+library(R2WinBUGS)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+library(leaflet)
+
+overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+overlay$ZBS<-as.numeric(as.factor(as.character(overlay$ZONA_CARTO)))
+
+# cambiar  
+
+for( i in 1:6)
+{
+B2<-subset(B, ANO==1)
+
+x<-B2$x
+zbs<-B2$ZBS
+
+t<-data.frame(x,zbs)
+t<-t[order(match(t$zbs,overlay$ZBS)),]
+
+palz<-brewer.pal(5,"Greys")[1:5]
+
+y<-c(0,1,5,9,13,16)
+
+paintz<-as.factor(cut(round(t$x),y,include.lowest = T,right = F))
+levz=levels(paintz)
+popupz<-paste(overlay$NOMBRE,round(t$x))
+
+def.par <- par(no.readonly = TRUE)
+postscript(paste(i,"impgea.eps",sep=""))
+
+plot(overlay,col=palz[paintz])
+dev.off()
+}
+
+title("",cex=0.75)
+legend(x="bottomright",fill=palz[1:5],
+       legend=c("0","1-4","5-8","9-12","11-16"),
+       cex=0.7,inset=0.03,title="Hospitalizations averted")
+
+```
+
