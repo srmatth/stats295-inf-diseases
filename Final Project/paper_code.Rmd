@@ -12,19 +12,19 @@ output: pdf_document
 ## Modelo que estima la tasa de hospitalizaci?n por cualquier causa
 ## de cada zbs para todo el periodo 2005-2016
 ```{r}
-load(file="datos_atrac_hosp.RData")
+load(file="data/datos_atrac_hosp.RData")
 ```
 # EL MODELO
 ```{r}
 
 library(maptools)
 library(spdep)
-library(R2WinBUGS)
+library(R2jags)
 library(RColorBrewer)
 library(classInt)
 library(rgdal)
 
-overlaya<- readOGR("./DATOS/stmapas", "ca_zonas_salud_201310")
+overlaya<- readOGR("data/stmapas", "ca_zonas_salud_201310")
 levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
 
 overlaya <- subset(overlaya, ZONA_CARTO!="02")
@@ -35,6 +35,7 @@ overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
 
 z<-z[order(match(z$ZBS,overlay$ZONA_CARTO)),]
 
+sf_use_s2(FALSE)
 W<-poly2nb(overlay)
 W[60]<-as.integer(72)
 W[72][[1]]<-as.integer(c(60,65,74))
@@ -54,7 +55,7 @@ model{
 
  sp[1:n]~car.normal(adj[],w[],num[],precsp)
 
- m~dflat()
+ m~dunif(-10000, 10000)
  
  prechet<-pow(sdhet,-2)
  precsp<-pow(sdsp,-2)
@@ -70,10 +71,10 @@ datos<-list(adj=W1$adj,w=W1$weights, num=W1$num,n=nrow(z),y=z$hosp,N=z$pob)
 iniciales<-function(){list(sdhet=runif(1),sdsp=runif(1),m=rnorm(1))}
 parametros<-c("sdhet","sdsp","m","p")
 
-res<-bugs(data=datos, inits=iniciales, parameters=parametros, 
+res<-jags(data=datos, inits=iniciales, parameters.to.save=parametros, 
 model.file="m1.txt", n.chains=3, 
-n.iter=40000, n.burnin=20000, debug=TRUE, DIC=FALSE
-,working=getwd())
+n.iter=40000, n.burnin=20000, DIC=FALSE
+,working.directory=getwd())
 
 # probabilidad promedio de hospitalizar
 

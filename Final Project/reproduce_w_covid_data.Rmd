@@ -1,0 +1,271 @@
+---
+title: "Reproduce with COVID Data"
+author: "Spencer Matthews"
+date: "12/3/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(sf)
+library(maptools)
+library(spdep)
+library(rstan)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+library(dplyr)
+```
+
+```{r}
+dat <- data.table::fread("covid_data/covid_hospitalizations_GA_NY_VA.csv") %>%
+  dplyr::mutate(
+    region_code = dplyr::case_when(
+      region == "VA" ~ 2,
+      region == "NY" ~ 1,
+      region == "GA" ~ 3
+    )
+  )
+data("us_states")
+sub_states <- us_states %>%
+  dplyr::filter(NAME %in% c("New York", "Georgia", "Virginia"))
+# tmp <- as_Spatial(us_states)
+# overlay <- spTransform(tmp, CRS("+proj=longlat +datum=WGS84"))
+
+sf_use_s2(FALSE)
+W<-list(c(2), c(1,3), c(2))
+W1 <- list(
+  adj = c(2, 1, 3, 2),
+  num = c(1, 2, 1)
+)
+```
+
+Ok now let's try a model or something like that
+```{r}
+set.seed(85)
+
+cat("
+data {
+   int<lower=0> n;
+   int<lower=0> y[n];
+   int<lower=0> vac[n];
+   int<lower=0> zbs[n];
+   int<lower=0> tiempo[n];
+   int<lower=0> N[n];
+   int<lower=0> nperiods;
+   int<lower=0> nzbs;
+   
+   int<lower=0> N_car;
+   int<lower=0> N_edges;
+   int node1[N_edges];
+   int node2[N_edges];
+   
+   int<lower=0> N_carT;
+   int<lower=0> N_edgesT;
+   int node1T[N_edgesT];
+   int node2T[N_edgesT];
+}
+
+parameters {
+   real beta_0;
+   real beta_1;
+   matrix[7,3] theta_S;
+   real<lower=0> sd_d;
+   real<lower=0> sd_inter;
+   vector[7] inter;
+   real<lower=0> sd_het;
+   real<lower=0> sd_spat;
+   real<lower=0,upper=1> ro;
+   matrix[nperiods, nzbs] het;
+}
+
+transformed parameters {
+   //Make parameters a function of other parameters
+   vector<lower=0, upper = 1>[n] p;
+   matrix[nperiods, nzbs] BYM;
+   matrix[nperiods, nzbs] theta_ST;
+   
+   for(z in 1:nzbs){
+      BYM[1,z] = sd_spat*theta_S[1,z] + sd_het*het[1,z];
+      theta_ST[1,z] = pow(1-ro*ro, -0.5)*BYM[1,z];
+   }
+   
+   for(t in 2:nperiods){
+      for(z in 1:nzbs){
+         BYM[t,z] = sd_spat*theta_S[t,z] + sd_het*het[t,z];
+         theta_ST[t,z] = ro*theta_ST[t-1,z]+BYM[1,z];
+      }
+   }
+   
+   for(i in 1:n){
+      p[i] = inv_logit(beta_0+ beta_1*vac[i]+inter[tiempo[i]] + theta_ST[tiempo[i],zbs[i]]);
+   }
+   
+}
+
+model {
+   real tau_inter;
+
+   for(i in 1:n){
+      y[i] ~ binomial(N[i], p[i]);
+   }
+   
+   for(z in 1:nzbs){
+      het[1,z] ~ normal(0,1);
+   }
+   
+   target += -0.5 * dot_self(theta_S[1, node1] - theta_S[1, node2]);
+   sum(theta_S[1,:]) ~ normal(0, 0.01 * N_car);
+   //theta_S[1,1:nzbs]~car.normal(map[],w[],nvec[],1) //FIXME
+   
+   for(t in 2:nperiods){
+      for(z in 1:nzbs){
+         het[t,z] ~ normal(0,1);
+      }
+      target += -0.5 * dot_self(theta_S[t,node1] - theta_S[t,node2]);
+      sum(theta_S[t,:]) ~ normal(0, 0.01 * N_car);
+      //theta_S[t,1:nzbs]~car.normal(map[],w[],nvec[],1); //FIXME
+   }
+   
+   beta_0 ~ uniform(-10000, 10000);
+   beta_1 ~ uniform(-10000, 10000);
+   
+   sd_het ~ uniform(0,5);
+   sd_spat ~ uniform(0,5);
+   
+   
+   tau_inter = pow(sd_inter, -2);
+   sd_inter ~ uniform(0,5);
+   
+   target += -0.5 * dot_self(inter[node1T] - inter[node2T]);
+   sum(inter) ~ normal(0, 0.01 * N_carT);
+   //inter[1:6]~car.normal(mapT[],wT[],nvecT[],tau.inter); //FIXME
+   
+   ro ~ uniform(-1,1);
+}
+", file = "full_mod_covid.stan")
+
+## Get the special spatial model info
+N <- length(W1$num)
+N_edges <- floor(length(W1$adj)/2)
+nn <- W1$num
+node1 = integer(N_edges)
+node2 = integer(N_edges)
+iAdj = 0;
+iEdge = 0;
+for (i in 1:N) {
+   cat("i:", i, "\n")
+   for (j in 1:nn[i]) {
+      cat("j:", j, "\n")
+      iAdj = iAdj + 1
+      cat("iAjd:", iAdj, "\n")
+      if (i < W1$adj[iAdj]) {
+         iEdge = iEdge + 1
+         node1[iEdge] = i
+         node2[iEdge] = W1$adj[iAdj]
+      }
+   }
+}
+##
+mod_dat <- dat %>%
+  dplyr::mutate(
+    vaccination_status = as.numeric(as.factor(vaccination_status)) - 1,
+    date = as.numeric(as.factor(date)),
+    number_hospitalized = case_when(
+      region == "GA" ~ round(population / 100000 * number_hospitalized),
+      vaccination_status == 0 ~ round(population * (1 - vaccination_prop) / 100000 * number_hospitalized),
+      vaccination_status == 1 ~ round(population * vaccination_prop / 100000 * number_hospitalized)
+    ),
+    N = ifelse(
+      vaccination_status == 1,
+      round(population * vaccination_prop),
+      round(population * (1- vaccination_prop))
+    )
+  )
+
+mapT<-c(2,1,3,2,4,3,5,4,6,5,7,6)#c(1,rep(2:6,each=2),7)+c(1,rep(c(-1,1),5),-1)
+numT<-c(1,2,2,2,2,2,1)#c(1,rep(2,5),1)
+wT<-rep(1,12) #rep(1,12)
+## Get the special spatial model info
+NT <- length(numT)
+N_edgesT <- floor(length(mapT)/2)
+nnT <- numT
+node1T = integer(N_edgesT)
+node2T = integer(N_edgesT)
+iAdjT = 0;
+iEdgeT = 0;
+for (i in 1:NT) {
+   cat("i:", i, "\n")
+   for (j in 1:nnT[i]) {
+      cat("j:", j, "\n")
+      iAdjT = iAdjT + 1
+      cat("iAjd:", iAdjT, "\n")
+      if (i < mapT[iAdjT]) {
+         iEdgeT = iEdgeT + 1
+         node1T[iEdgeT] = i
+         node2T[iEdgeT] = mapT[iAdjT]
+      }
+   }
+}
+##
+
+datos<-list(y=mod_dat$number_hospitalized,
+            vac=mod_dat$vaccination_status,
+            zbs=mod_dat$region_code,
+            tiempo=mod_dat$date,
+            N_car = N,
+            N_edges = N_edges,
+            node1 = node1,
+            node2 = node2,
+            #map=W1$adj,w=W1$weights, nvec=W1$num,
+            N_carT = NT,
+            N_edgesT = N_edgesT,
+            node1T = node1T,
+            node2T = node2T,
+            #mapT=mapT,wT=wT, nvecT=numT,
+            n=nrow(mod_dat),
+            N=mod_dat$N,
+            nperiods=7,
+            nzbs=3
+                        )
+
+iniciales<-function(){list(beta_0=rnorm(1),beta_1=rnorm(1),
+                           theta_S=matrix(rnorm(7*3),ncol=3,nrow=7),
+                           sd_d=runif(1),
+                           inter=rnorm(7),
+                           theta_ST=matrix(rnorm(7*3),ncol=3,nrow=7),
+                           sd_inter=runif(1),
+                           sd_het=runif(1),
+                           sd_spat=runif(1),
+                           ro=runif(1),
+                           p = runif(nrow(mod_dat))
+                           )}
+parametros<-c("beta_0","beta_1","ro","sd_spat","sd_het","sd_d","sd_inter","inter","theta_ST")
+
+res2_covid<-stan(data=datos, init=iniciales, pars=parametros, 
+file="full_mod_covid.stan", chains=3, 
+iter=10000, warmup=2000, cores = 3)
+
+res2_sum <- summary(res2_covid)
+
+res2_sum$summary
+
+draws <- extract(res2_covid)
+plot(density(draws$beta_0))
+plot(density(draws$beta_1))
+plot(density(draws$inter[,2]))
+plot(density(draws$inter[,3]))
+
+colMeans(draws$inter)
+
+# save(res2,file="RV_mod_param_reproduction.RData")
+```
+
+It worked! Now to get the coefficients
+```{r}
+
+```
+
+
+

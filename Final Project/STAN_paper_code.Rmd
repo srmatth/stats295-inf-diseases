@@ -1,0 +1,402 @@
+---
+title: "STAN Paper Code Reproduction"
+author: "Spencer Matthews"
+date: "12/1/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(maptools)
+library(spdep)
+library(rstan)
+library(RColorBrewer)
+library(classInt)
+library(rgdal)
+
+load(file="data/datos_atrac_hosp.RData")
+```
+
+Ok, let's try to reproduce the first model in STAN.
+This gets the deltas for each health district.
+```{r}
+overlaya<- readOGR("data/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+z<-z[order(match(z$ZBS,overlay$ZONA_CARTO)),]
+
+sf_use_s2(FALSE)
+W<-poly2nb(overlay)
+W[60]<-as.integer(72)
+W[72][[1]]<-as.integer(c(60,65,74))
+W1<-nb2WB(W)
+
+cat("
+data {
+   int<lower=0> n;
+   int<lower=0> y[n];
+   int<lower=0> N[n];
+   
+   int<lower=0> N_car;
+   int<lower=0> N_edges;
+   int node1[N_edges];
+   int node2[N_edges];
+}
+
+parameters {
+   real m;
+   real het[n];
+   vector[n] sp;
+   real<lower=0> sdhet;
+   real<lower=0> sdsp;
+   
+   //vector[N_car] phi;
+   real sigma;
+}
+
+transformed parameters {
+   vector<lower=0, upper = 1>[n] p;
+   for(i in 1:n){
+      p[i] = inv_logit(m+het[i]+sp[i]);
+   }
+}
+
+model{
+
+ real prechet;
+ real precsp;
+ 
+ prechet=pow(sdhet,-2);
+ precsp=pow(sdsp,-2);
+
+ for(i in 1:n)
+	{
+ 		het[i]~normal(0,prechet);
+ 		
+ 		y[i]~binomial(N[i],p[i]);
+	}
+	
+ target += -0.5 * dot_self(sp[node1] - sp[node2]);
+ sum(sp) ~ normal(0, 0.01 * N_car);
+ //sp[1:n]~car.normal(adj[],w[],num[],precsp);
+
+ m~uniform(-10000, 10000);
+ sdhet~uniform(0,10);
+ sdsp~uniform(0,10);
+}
+",file="m1.stan")
+
+
+## Initialize node 1 and node 2
+
+N <- length(W1$num)
+N_edges <- floor(length(W1$adj)/2)
+nn <- W1$num
+node1 = integer(N_edges)
+node2 = integer(N_edges)
+iAdj = 0;
+iEdge = 0;
+for (i in 1:N) {
+   cat("i:", i, "\n")
+   for (j in 1:nn[i]) {
+      cat("j:", j, "\n")
+      iAdj = iAdj + 1
+      cat("iAjd:", iAdj, "\n")
+      if (i < W1$adj[iAdj]) {
+         iEdge = iEdge + 1
+         node1[iEdge] = i
+         node2[iEdge] = W1$adj[iAdj]
+      }
+   }
+}
+
+datos<-list(n=nrow(z),y=z$hosp,N=z$pob, N_car = as.integer(N), node1 = node1, node2 = node2, N_edges = N_edges)
+
+iniciales<-function(){list(sdhet=runif(1),sdsp=runif(1),m=rnorm(1))}
+parametros<-c("sdhet","sdsp","m","p")
+
+res<-stan(data=datos, init=iniciales, pars=parametros,
+file="m1.stan",
+iter=40000, warmup=20000)
+
+# probabilidad promedio de hospitalizar
+
+res_summary <- summary(res)
+
+atrac<-res_summary$summary[4:(nrow(res_summary$summary)-1),1]
+z<-cbind(z,atrac)
+
+save(z,file="datos_prob_hospitalizar_zbs.RData")
+
+load("data/datos_prob_hospitalizar_zbs.RData")
+```
+
+Now we can try to fit the full model that they had in their paper.
+```{r}
+load(file="data/datos_prob_hospitalizar_zbs.RData")
+z <- z[,c(1,4)]
+load(file="data/datos_mod_impacto.RData")
+
+dat_mod<-merge(dat,z,by="ZBS",all.x=T)
+dat_mod<-subset(dat_mod,ANO!="2003-2004")
+
+set.seed(85)
+
+cat("
+data {
+   int<lower=0> n;
+   int<lower=0> y[n];
+   real<lower=0,upper=1> atrac[n];
+   int<lower=0> vac[n];
+   int<lower=0> sexo[n];
+   int<lower=0> edad[n];
+   int<lower=0> dpto[n];
+   int<lower=0> zbs[n];
+   int<lower=0> tiempo[n];
+   int<lower=0> N[n];
+   int<lower=0> nperiods;
+   int<lower=0> nzbs;
+   
+   int<lower=0> N_car;
+   int<lower=0> N_edges;
+   int node1[N_edges];
+   int node2[N_edges];
+   
+   int<lower=0> N_carT;
+   int<lower=0> N_edgesT;
+   int node1T[N_edgesT];
+   int node2T[N_edgesT];
+}
+
+parameters {
+   real beta_0;
+   real beta_1;
+   real beta_2;
+   vector[3] beta_3;
+   matrix[6,241] theta_S;
+   real<lower=0> sd_d;
+   real<lower=0> sd_inter;
+   vector[6] inter;
+   real<lower=0> sd_het;
+   real<lower=0> sd_spat;
+   real<lower=0,upper=1> ro;
+   vector[24] alpha_d;
+   matrix[nperiods, nzbs] het;
+}
+
+transformed parameters {
+   //Make parameters a function of other parameters
+   vector<lower=0, upper = 1>[n] p;
+   matrix[nperiods, nzbs] BYM;
+   matrix[nperiods, nzbs] theta_ST;
+   
+   for(z in 1:nzbs){
+      BYM[1,z] = sd_spat*theta_S[1,z] + sd_het*het[1,z];
+      theta_ST[1,z] = pow(1-ro*ro, -0.5)*BYM[1,z];
+   }
+   
+   for(t in 2:nperiods){
+      for(z in 1:nzbs){
+         BYM[t,z] = sd_spat*theta_S[t,z] + sd_het*het[t,z];
+         theta_ST[t,z] = ro*theta_ST[t-1,z]+BYM[1,z];
+      }
+   }
+   
+   for(i in 1:n){
+      p[i] = inv_logit(logit(atrac[i])+beta_0+ beta_1*vac[i]+ beta_2*sexo[i]+beta_3[edad[i]]+alpha_d[dpto[i]] +inter[tiempo[i]] + theta_ST[tiempo[i],zbs[i]]);
+   }
+   
+}
+
+model {
+   real tau_d;
+   real tau_inter;
+
+   for(i in 1:n){
+      y[i] ~ binomial(N[i], p[i]);
+   }
+   
+   for(z in 1:nzbs){
+      het[1,z] ~ normal(0,1);
+   }
+   
+   target += -0.5 * dot_self(theta_S[1, node1] - theta_S[1, node2]);
+   sum(theta_S[1,:]) ~ normal(0, 0.01 * N_car);
+   //theta_S[1,1:nzbs]~car.normal(map[],w[],nvec[],1) //FIXME
+   
+   for(t in 2:nperiods){
+      for(z in 1:nzbs){
+         het[t,z] ~ normal(0,1);
+      }
+      target += -0.5 * dot_self(theta_S[t,node1] - theta_S[t,node2]);
+      sum(theta_S[t,:]) ~ normal(0, 0.01 * N_car);
+      //theta_S[t,1:nzbs]~car.normal(map[],w[],nvec[],1); //FIXME
+   }
+   
+   beta_0 ~ uniform(-10000, 10000);
+   beta_1 ~ uniform(-10000, 10000);
+   beta_2 ~ uniform(-10000, 10000);
+   
+   //beta_3[1] ~ normal(0, 0.000001);
+   for(k in 2:3){beta_3[k] ~ uniform(-10000, 10000);}
+   
+   sd_het ~ uniform(0,5);
+   sd_spat ~ uniform(0,5);
+   
+   tau_d = pow(sd_d, -2);
+   sd_d ~ uniform(0,5);
+   for(d in 1:24){
+   alpha_d[d] ~ normal(0, tau_d);
+   }
+   
+   tau_inter = pow(sd_inter, -2);
+   sd_inter ~ uniform(0,5);
+   
+   target += -0.5 * dot_self(inter[node1T] - inter[node2T]);
+   sum(inter) ~ normal(0, 0.01 * N_carT);
+   //inter[1:6]~car.normal(mapT[],wT[],nvecT[],tau.inter); //FIXME
+   
+   ro ~ uniform(-1,1);
+}
+", file = "full_mod.stan")
+
+overlaya<- readOGR("data/stmapas", "ca_zonas_salud_201310")
+levels(overlaya$ZONA_CARTO)[levels(overlaya$ZONA_CARTO)=="0705"]<-"2309"
+
+overlaya <- subset(overlaya, ZONA_CARTO!="02")
+overlaya <- subset(overlaya, ZONA_CARTO!="05")
+overlaya <- subset(overlaya, ZONA_CARTO!="16")
+
+overlay <- spTransform(overlaya, CRS("+proj=longlat +datum=WGS84"))
+
+
+dat_mod2<-dat_mod[order(match(dat_mod$ZBS,overlay$ZONA_CARTO)),]
+
+W<-poly2nb(overlay)
+W[60]<-as.integer(72)
+W[72][[1]]<-as.integer(c(60,65,74))
+W1<-nb2WB(W)
+
+## Get the special spatial model info
+N <- length(W1$num)
+N_edges <- floor(length(W1$adj)/2)
+nn <- W1$num
+node1 = integer(N_edges)
+node2 = integer(N_edges)
+iAdj = 0;
+iEdge = 0;
+for (i in 1:N) {
+   cat("i:", i, "\n")
+   for (j in 1:nn[i]) {
+      cat("j:", j, "\n")
+      iAdj = iAdj + 1
+      cat("iAjd:", iAdj, "\n")
+      if (i < W1$adj[iAdj]) {
+         iEdge = iEdge + 1
+         node1[iEdge] = i
+         node2[iEdge] = W1$adj[iAdj]
+      }
+   }
+}
+##
+
+dat_mod2$ZBS<-as.numeric(as.factor(dat_mod2$ZBS))
+dat_mod2$DPTO<-as.numeric(as.factor(dat_mod2$DPTO))
+dat_mod2$SEXO<-as.numeric(as.factor(dat_mod2$SEXO))-1
+dat_mod2$VAC<-as.numeric(as.factor(dat_mod2$VAC))-1
+dat_mod2$EDAD<-as.numeric(as.factor(dat_mod2$EDAD))
+dat_mod2$ANO<-as.numeric(as.factor(dat_mod2$ANO))
+
+mapT<-c(2,1,3,2,4,3,5,4,6,5)#c(1,rep(2:6,each=2),7)+c(1,rep(c(-1,1),5),-1)
+numT<-c(1,2,2,2,2,1)#c(1,rep(2,5),1)
+wT<-rep(1,10) #rep(1,12)
+## Get the special spatial model info
+NT <- length(numT)
+N_edgesT <- floor(length(mapT)/2)
+nnT <- numT
+node1T = integer(N_edgesT)
+node2T = integer(N_edgesT)
+iAdjT = 0;
+iEdgeT = 0;
+for (i in 1:NT) {
+   cat("i:", i, "\n")
+   for (j in 1:nnT[i]) {
+      cat("j:", j, "\n")
+      iAdjT = iAdjT + 1
+      cat("iAjd:", iAdjT, "\n")
+      if (i < mapT[iAdjT]) {
+         iEdgeT = iEdgeT + 1
+         node1T[iEdgeT] = i
+         node2T[iEdgeT] = mapT[iAdjT]
+      }
+   }
+}
+##
+
+datos<-list(y=dat_mod2$RV,
+            atrac=dat_mod2$atrac,
+            vac=dat_mod2$VAC,
+            sexo=dat_mod2$SEXO,
+            edad=dat_mod2$EDAD,
+            dpto=dat_mod2$DPTO,
+            zbs=dat_mod2$ZBS,
+            tiempo=dat_mod2$ANO,
+            N_car = N,
+            N_edges = N_edges,
+            node1 = node1,
+            node2 = node2,
+            #map=W1$adj,w=W1$weights, nvec=W1$num,
+            N_carT = NT,
+            N_edgesT = N_edgesT,
+            node1T = node1T,
+            node2T = node2T,
+            #mapT=mapT,wT=wT, nvecT=numT,
+            n=nrow(dat_mod2),
+            N=dat_mod2$pob,
+            nperiods=6,
+            nzbs=241
+                        )
+
+iniciales<-function(){list(beta_0=rnorm(1),beta_1=rnorm(1),
+                           beta_2=rnorm(1),
+                           beta_3=c(0,rnorm(2)),
+                           theta_S=matrix(rnorm(6*241),ncol=241,nrow=6),
+                           alpha_d = rnorm(24),
+                           sd_d=runif(1),
+                           inter=rnorm(6),
+                           theta_ST=matrix(rnorm(6*241),ncol=241,nrow=6),
+                           sd_inter=runif(1),
+                           sd_het=runif(1),
+                           sd_spat=runif(1),
+                           ro=runif(1),
+                           p = runif(nrow(dat_mod2))
+                           )}
+parametros<-c("beta_0","beta_1","beta_2","ro","sd_spat","sd_het","sd_d","sd_inter","beta_3","alpha_d","inter","theta_ST")
+
+res2<-stan(data=datos, init=iniciales, pars=parametros, 
+file="full_mod.stan", chains=3, 
+iter=10000, warmup=2000, cores = 6)
+
+res2_sum <- summary(res2)
+
+res2_sum$summary
+
+save(res2,file="RV_mod_param_reproduction.RData")
+# save(dat_mod2,file="impacto.RData")
+```
+
+
+```{r}
+
+```
+
+
+
+

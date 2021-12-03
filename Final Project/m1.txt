@@ -1,0 +1,52 @@
+
+data {
+   int<lower=0> n;
+   int<lower=0> y[n];
+   int<lower=0> N[n];
+   //int<lower=0> adj[1318];
+   //int<lower=0> w[1318];
+   //int<lower=0> num[1318];
+   real het[n];
+   real sp[n];
+   
+   int<lower=0> N_car;
+   int<lower=0> N_edges;
+   int node1[N_edges];
+   int node2[N_edges];
+}
+
+parameters {
+   vector[n] p;
+   real m;
+   real sdhet;
+   real sdsp;
+   
+   vector[N_car] phi;
+   real sigma;
+}
+
+model{
+
+ real prechet;
+ real precsp;
+
+ for(i in 1:n)
+	{
+ 		y[i]~binomial_lpmf(N[i],p[i]);
+
+ 		//logit(p[i])<-m+het[i]+sp[i];
+
+ 		het[i]~normal_lpdf(0,prechet);
+	}
+	
+ target += -0.5 * dot_self(phi[node1] - phi[node2]);
+ sum(phi) ~ normal(0, 0.01 * N_car);
+ //sp[1:n]~car.normal(adj[],w[],num[],precsp);
+
+ m~uniform(-10000, 10000);
+ 
+ prechet=pow(sdhet,-2);
+ precsp=pow(sdsp,-2);
+ sdhet~uniform(0,10);
+ sdsp~uniform(0,10);
+}
