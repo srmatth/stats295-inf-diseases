@@ -443,7 +443,10 @@ probs_if_zero <- exp(probs_if_zero) / (1 + exp(probs_if_zero))
 
 averted_hospitalizations <- probs_if_zero * dat_mod2$pob -probs * dat_mod2$pob
 sum(averted_hospitalizations)
+
+variance_for_averted <- probs_if_zero * (1 - probs_if_zero) * dat_mod2$pob + probs * (1 - probs) * dat_mod2$pob
 ```
+
 
 
 Now for real let's plot some posteriors
@@ -454,6 +457,7 @@ plot(density(draws$beta_0))
 plot(density(draws$beta_1))
 plot(density(draws$beta_2))
 plot(density(draws$beta_3[,2]))
+plot(density(draws$beta_3[,3]))
 plot(density(draws$theta_ST[,2,4]))
 
 plot(density(draws$inter[,6]))
@@ -481,6 +485,31 @@ draws$inter %>%
    )
 
 
+```
+
+```{r}
+draws$beta_3 %>%
+   as.data.frame() %>%
+   magrittr::set_colnames(
+      stringr::str_c("Age ", 1:3)
+   ) %>%
+   tidyr::pivot_longer(
+      cols = dplyr::everything(),
+      names_to = "period",
+      values_to = "estimate"
+   ) %>%
+   dplyr::filter(period == "Age 2") %>%
+   ggplot() +
+   aes(x = estimate) +
+   geom_density() +
+   theme_bw() +
+   ylab("Density") +
+   xlab("Age Effect Estimate (Beta_3)") +
+   ggtitle("Posterior Distributions for Age Effect") +
+   theme(
+      text = element_text(family = "Times New Roman"),
+      plot.title = element_text(hjust = 0.5)
+   )
 ```
 
 
