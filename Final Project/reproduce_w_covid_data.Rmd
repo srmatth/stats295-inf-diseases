@@ -16,6 +16,7 @@ library(RColorBrewer)
 library(classInt)
 library(rgdal)
 library(dplyr)
+library(ggplot2)
 ```
 
 ```{r}
@@ -264,8 +265,106 @@ colMeans(draws$inter)
 
 It worked! Now to get the coefficients
 ```{r}
+intercept <- mean(draws$beta_0)
+vaccinated <- mean(draws$beta_1)
+#ro <- mean(draws$ro)
+inter <- colMeans(draws$inter)
 
+theta_ST <- matrix(
+  c(
+    colMeans(draws$theta_ST[,,1]),
+    colMeans(draws$theta_ST[,,2]),
+    colMeans(draws$theta_ST[,,3])
+  ),
+  nrow = 3,
+  ncol = 7
+)
+
+get_prob <- function(dat) {
+  intercept + vaccinated * dat$vaccination_status + inter[dat$date] + theta_ST[dat$region_code, dat$date]
+}
+
+probs <- numeric(nrow(mod_dat))
+for (i in 1:nrow(mod_dat)) {
+  j <- get_prob(mod_dat[i,])
+  probs[i] <- j
+}
+
+probs <- exp(probs) / (1 + exp(probs))
+res_dat <- mod_dat %>%
+  mutate(
+    prob = probs,
+    expected_value = N * prob,
+    residuals = number_hospitalized - expected_value
+  )
+
+probs_if_zero <- numeric(nrow(mod_dat))
+for (i in 1:nrow(mod_dat)) {
+  tmp <- mod_dat[i,]
+  tmp$vaccination_status <- 0
+  j  <- get_prob(tmp)
+  probs_if_zero[i] <- j
+}
+probs_if_zero <- exp(probs_if_zero) / (1 + exp(probs_if_zero))
+
+averted_hospitalizations <- probs_if_zero * mod_dat$N -probs * mod_dat$N
+sum(averted_hospitalizations)
+
+probs_if_all <- numeric(nrow(mod_dat))
+for (i in 1:nrow(mod_dat)) {
+  tmp <- mod_dat[i,]
+  tmp$vaccination_status <- 1
+  j  <- get_prob(tmp)
+  probs_if_all[i] <- j
+}
+probs_if_all <- exp(probs_if_all) / (1 + exp(probs_if_all))
+
+sum(mod_dat$number_hospitalized) - sum(probs_if_all * mod_dat$N)
+
+(sum(mod_dat$number_hospitalized) - sum(probs_if_all * mod_dat$N)) / sum(mod_dat$number_hospitalized)
 ```
 
+```{r}
+## Hospitalizations averted, by state and time period
+
+averted_sub <- res_dat %>%
+  mutate(
+    averted = averted_hospitalizations, 
+         #date = stringr::str_c(month.abb[date + 4], " 2021")
+    date = date + 4
+    ) %>%
+  filter(vaccination_status == 1) %>%
+  select(region, date, vaccination_prop, averted)
+
+ggplot(averted_sub) +
+  aes(x = date, y = averted, fill = vaccination_prop) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~region, ncol = 1) +
+  theme_classic() +
+  xlab("Month (2021)") +
+  ylab("Averted Hospitalizations") +
+  ggtitle("Averted Hospitalizations due to the COVID-19 Vaccine", "In Georgia, New York, and Virginia") +
+  labs(fill = "Proportion of Population \nthat was Fully Vaccinated") +
+  guides(
+    fill = guide_colorbar(
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
+  scale_x_continuous(
+    breaks = 5:11,
+    labels = function(x){month.abb[x]}
+  ) +
+  scale_y_continuous(
+    labels = scales::number_format(accuracy = 1, big.mark = ",")
+  ) +
+  scale_fill_gradient(low = "#D2E4EE", high = "#533A7B") +
+  theme(
+    text = element_text(family = "Times New Roman"),
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
 
 

@@ -124,16 +124,16 @@ parametros<-c("sdhet","sdsp","m","p")
 
 res<-stan(data=datos, init=iniciales, pars=parametros,
 file="m1.stan",
-iter=40000, warmup=20000)
+iter=40000, warmup=20000, cores = 3, chains = 3)
 
 # probabilidad promedio de hospitalizar
 
 res_summary <- summary(res)
 
-atrac<-res_summary$summary[4:(nrow(res_summary$summary)-1),1]
+atrac_me<-res_summary$summary[4:(nrow(res_summary$summary)-1),1]
 z<-cbind(z,atrac)
 
-save(z,file="datos_prob_hospitalizar_zbs.RData")
+# save(z,file="datos_prob_hospitalizar_zbs.RData")
 
 load("data/datos_prob_hospitalizar_zbs.RData")
 ```
@@ -392,11 +392,95 @@ save(res2,file="RV_mod_param_reproduction.RData")
 # save(dat_mod2,file="impacto.RData")
 ```
 
-
+This is where we see how effective the vaccine was, based on the model
 ```{r}
+load("RV_mod_param_reproduction.RData")
+library(ggplot2)
 
+draws_orig <- extract(res2)
+
+intercept <- mean(draws_orig$beta_0)
+vaccinated <- mean(draws_orig$beta_1)
+sex <- mean(draws_orig$beta_2)
+age <- colMeans(draws_orig$beta_3)
+age[1] <- 0
+inter <- colMeans(draws_orig$inter)
+
+raw_dat <- numeric(6 * 241)
+for (i in 0:240) {
+   for (j in 1:6) {
+      raw_dat[6*i + j] <- mean(draws_orig$theta_ST[,j,i+1])
+   }
+}
+theta_ST <- matrix(raw_dat, ncol = 6)
+
+get_prob <- function(dat) {
+  intercept + vaccinated * dat$VAC + sex * dat$SEXO + age[dat$EDAD] + inter[dat$ANO] + theta_ST[dat$ZBS, dat$ANO]
+}
+
+probs <- numeric(nrow(dat_mod2))
+for (i in 1:nrow(dat_mod2)) {
+  j <- get_prob(dat_mod2[i,])
+  probs[i] <- j
+}
+
+probs <- exp(probs) / (1 + exp(probs))
+res_dat <- dat_mod2 %>%
+  mutate(
+    prob = probs,
+    expected_value = pob * prob,
+    residuals = RV - expected_value
+  )
+
+probs_if_zero <- numeric(nrow(dat_mod2))
+for (i in 1:nrow(dat_mod2)) {
+  tmp <- dat_mod2[i,]
+  tmp$VAC <- 0
+  j  <- get_prob(tmp)
+  probs_if_zero[i] <- j
+}
+probs_if_zero <- exp(probs_if_zero) / (1 + exp(probs_if_zero))
+
+averted_hospitalizations <- probs_if_zero * dat_mod2$pob -probs * dat_mod2$pob
+sum(averted_hospitalizations)
 ```
 
 
+Now for real let's plot some posteriors
+```{r}
+draws <- extract(res2)
+
+plot(density(draws$beta_0))
+plot(density(draws$beta_1))
+plot(density(draws$beta_2))
+plot(density(draws$beta_3[,2]))
+plot(density(draws$theta_ST[,2,4]))
+
+plot(density(draws$inter[,6]))
+draws$inter %>%
+   as.data.frame() %>%
+   magrittr::set_colnames(
+      stringr::str_c("Time Period ", 1:6)
+   ) %>%
+   tidyr::pivot_longer(
+      cols = dplyr::everything(),
+      names_to = "period",
+      values_to = "estimate"
+   ) %>%
+   ggplot() +
+   aes(x = estimate) +
+   geom_density() +
+   facet_wrap(~period, ncol = 6) +
+   theme_bw() +
+   ylab("Density") +
+   xlab("Time Effect Estimate (u_t)") +
+   ggtitle("Posterior Distributions for Time Effect") +
+   theme(
+      text = element_text(family = "Times New Roman"),
+      plot.title = element_text(hjust = 0.5)
+   )
+
+
+```
 
 
